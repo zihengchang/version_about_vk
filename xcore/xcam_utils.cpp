@@ -291,7 +291,7 @@ dump_buf_perfix_path (const SmartPtr<VideoBuffer> buf, const char *prefix_name)
     snprintf (
         file_name, 256, "%s-%dx%d.%s.yuv",
         prefix_name, info.width, info.height, xcam_fourcc_to_string (info.format));
-
+    printf("\nwidth:%d  height:%d\n\n", info.width, info.height);
     dump_video_buf (buf, file_name);
 }
 

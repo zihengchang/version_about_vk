@@ -59,6 +59,14 @@ namespace VKStitcherPriv {
 
 DECLARE_HANDLER_CALLBACK (CbGeoMap, VKStitcher, geomap_done);
 
+struct FisheyeMap {
+    SmartPtr<GeoMapper>          mapper;
+    SmartPtr<BufferPool>         buf_pool;
+    FisheyeDewarpMode            dewarp_mode;
+    FisheyeInfo                  fisheye_info;
+    // Factor                       left_match_factor, right_match_factor;
+};
+
 struct GeoMapParam
     : ImageHandler::Parameters
 {
@@ -113,7 +121,7 @@ public:
         : _stitcher (handler)
     {}
 
-    XCamReturn init_resource ();
+    XCamReturn init_resource (uint32_t count);
 
     XCamReturn start_geo_mappers (const SmartPtr<VKStitcher::StitcherParam> &param);
     XCamReturn start_blenders (const SmartPtr<VKStitcher::StitcherParam> &param, uint32_t idx);
@@ -139,7 +147,8 @@ private:
     XCamReturn create_geomap_pool (const SmartPtr<VKDevice> &dev, uint32_t idx);
     XCamReturn set_geomap_table (
         const SmartPtr<VKGeoMapHandler> &mapper, const CameraInfo &cam_info,
-        const Stitcher::RoundViewSlice &view_slice, const BowlDataConfig &bowl);
+        const Stitcher::RoundViewSlice &view_slice, const BowlDataConfig &bowl,
+        uint32_t idx);
     XCamReturn generate_geomap_table (const SmartPtr<VKGeoMapHandler> &mapper, uint32_t idx);
 
     void update_blender_sync (uint32_t idx);
@@ -148,6 +157,8 @@ private:
 private:
     StitcherResource              _res;
     VKStitcher                   *_stitcher;
+    StitchInfo                    _stitch_info;
+    FisheyeMap                    _fisheye [XCAM_STITCH_MAX_CAMERAS];
 };
 
 StitcherResource::StitcherResource ()
@@ -260,25 +271,62 @@ StitcherImpl::create_geomap_pool (const SmartPtr<VKDevice> &dev, uint32_t idx)
 XCamReturn
 StitcherImpl::set_geomap_table (
     const SmartPtr<VKGeoMapHandler> &mapper, const CameraInfo &cam_info,
-    const Stitcher::RoundViewSlice &view_slice, const BowlDataConfig &bowl)
+    const Stitcher::RoundViewSlice &view_slice, const BowlDataConfig &bowl,
+    uint32_t idx)
 {
     uint32_t table_width = view_slice.width / MAP_FACTOR_X;
     uint32_t table_height = view_slice.height / MAP_FACTOR_Y;
+    SmartPtr<FisheyeDewarp> dewarper;
+    FisheyeMap &fisheye = _fisheye[idx];
+    fisheye.dewarp_mode = _stitcher->get_dewarp_mode ();
+    if (fisheye.dewarp_mode == DewarpBowl) {
+        PolyBowlFisheyeDewarp fd;
+        fd.set_out_size (view_slice.width, view_slice.height);
+        fd.set_table_size (table_width, table_height);
+        fd.set_intr_param (cam_info.calibration.intrinsic);
+        fd.set_extr_param (cam_info.calibration.extrinsic);
+        fd.set_bowl_config (bowl);
 
-    PolyBowlFisheyeDewarp fd;
-    fd.set_out_size (view_slice.width, view_slice.height);
-    fd.set_table_size (table_width, table_height);
-    fd.set_intr_param (cam_info.calibration.intrinsic);
-    fd.set_extr_param (cam_info.calibration.extrinsic);
-    fd.set_bowl_config (bowl);
+        CalibrationInfo camx = cam_info.calibration;
+        printf("fov:%f roll:%f cx:%f\n", camx.intrinsic.fov, camx.extrinsic.roll, camx.intrinsic.cx, cam_info.calibration);
+        printf("view_slice width:%d  height:%d\n", view_slice.width, view_slice.height);
 
-    FisheyeDewarp::MapTable map_table (table_width * table_height);
-    fd.gen_table (map_table);
 
-    bool ret = mapper->set_lookup_table (map_table.data (), table_width, table_height);
-    XCAM_FAIL_RETURN (
-        ERROR, ret, XCAM_RETURN_ERROR_UNKNOWN,
-        "vk-stitcher(%s) set geomap lookup table failed", XCAM_STR (_stitcher->get_name ()));
+        FisheyeDewarp::MapTable map_table (table_width * table_height);
+        fd.gen_table (map_table);
+
+        bool ret = mapper->set_lookup_table (map_table.data (), table_width, table_height);
+        XCAM_FAIL_RETURN (
+            ERROR, ret, XCAM_RETURN_ERROR_UNKNOWN,
+            "vk-stitcher(%s) set geomap lookup table failed", XCAM_STR (_stitcher->get_name ()));
+    } else {
+        float max_dst_latitude = (fisheye.fisheye_info.intrinsic.fov > 180.0f) ? 180.0f : fisheye.fisheye_info.intrinsic.fov;
+        float max_dst_longitude;
+
+        max_dst_longitude = max_dst_latitude * view_slice.width / view_slice.height;
+
+        SmartPtr<SphereFisheyeDewarp> fd = new SphereFisheyeDewarp ();
+        fd->set_fisheye_info (fisheye.fisheye_info);
+        fd->set_dst_range (max_dst_longitude, max_dst_latitude);
+        dewarper = fd;
+
+        dewarper->set_out_size (view_slice.width, view_slice.height);
+
+        uint32_t table_width = view_slice.width / MAP_FACTOR_X;
+        table_width = XCAM_ALIGN_UP (table_width, 4);
+        uint32_t table_height = view_slice.height / MAP_FACTOR_Y;
+        table_height = XCAM_ALIGN_UP (table_height, 2);
+        dewarper->set_table_size (table_width, table_height);
+
+        FisheyeDewarp::MapTable map_table (table_width * table_height);
+        dewarper->gen_table (map_table);
+
+        // XCAM_FAIL_RETURN (
+        //     ERROR, dewarper.ptr(), XCAM_RETURN_ERROR_UNKNOWN,
+        //     "vk-stitcher(%s) set geomap lookup table failed", XCAM_STR (_stitcher->get_name ()));
+    }
+
+
 
     return XCAM_RETURN_NO_ERROR;
 }
@@ -303,7 +351,7 @@ StitcherImpl::generate_geomap_table (
         view_slice.hori_angle_start, view_slice.hori_angle_range,
         bowl.angle_start, bowl.angle_end);
 
-    XCamReturn ret = set_geomap_table (mapper, cam_info, view_slice, bowl);
+    XCamReturn ret = set_geomap_table (mapper, cam_info, view_slice, bowl, idx);
     XCAM_FAIL_RETURN (
         ERROR, xcam_ret_is_ok (ret), ret,
         "vk-stitcher(%s) set geometry map table failed, idx:%d", XCAM_STR (_stitcher->get_name ()), idx);
@@ -318,6 +366,13 @@ StitcherImpl::init_geo_mappers (const SmartPtr<VKDevice> &dev)
     SmartPtr<ImageHandler::Callback> cb = new CbGeoMap (_stitcher);
 
     for (uint32_t idx = 0; idx < cam_num; ++idx) {
+        FisheyeMap &fisheye = _fisheye[idx];
+        fisheye.dewarp_mode = _stitcher->get_dewarp_mode ();
+
+        if (fisheye.dewarp_mode == DewarpSphere) {
+            fisheye.fisheye_info = _stitch_info.fisheye_info[idx];
+        }
+
         Stitcher::RoundViewSlice view_slice = _stitcher->get_round_view_slice (idx);
 
         SmartPtr<VKGeoMapHandler> &mapper = _res.mapper[idx];
@@ -446,11 +501,19 @@ StitcherImpl::init_feature_matchers ()
         const Stitcher::ImageOverlapInfo &info = _stitcher->get_overlap (idx);
         Rect left_ovlap = info.left;
         Rect right_ovlap = info.right;
-        left_ovlap.pos_y = 0;
-        left_ovlap.height = int32_t (bowl.wall_height / (bowl.wall_height + bowl.ground_length) * left_ovlap.height);
-        right_ovlap.pos_y = 0;
-        right_ovlap.height = left_ovlap.height;
-        matcher->set_crop_rect (left_ovlap, right_ovlap);
+        if (_stitch_info->get_dewarp_mode () == DewarpSphere) {
+            const FMRegionRatio &ratio = _stitcher->get_fm_region_ratio ();
+            left_ovlap.pos_y = left_ovlap.height * ratio.pos_y;
+            left_ovlap.height = left_ovlap.height * ratio.height;
+            right_ovlap.pos_y = left_ovlap.pos_y;
+            right_ovlap.height = left_ovlap.height;
+        } else {
+            left_ovlap.pos_y = 0;
+            left_ovlap.height = int32_t (bowl.wall_height / (bowl.wall_height + bowl.ground_length) * left_ovlap.height);
+            right_ovlap.pos_y = 0;
+            right_ovlap.height = left_ovlap.height;
+            matcher->set_crop_rect (left_ovlap, right_ovlap);
+        }
     }
 #else
     XCAM_LOG_ERROR ("vk-stitcher(%s) feature match is unsupported", XCAM_STR (_stitcher->get_name ()));
@@ -459,8 +522,20 @@ StitcherImpl::init_feature_matchers ()
 }
 
 XCamReturn
-StitcherImpl::init_resource ()
+StitcherImpl::init_resource (uint32_t count)
 {
+    if (_stitcher->get_dewarp_mode () == DewarpSphere) {
+        _stitch_info = _stitcher->get_stitch_info ();
+    }
+    for (uint32_t i = 0; i < count; ++i) {
+        FisheyeMap &fisheye = _fisheye[i];
+        fisheye.dewarp_mode = _stitcher->get_dewarp_mode ();
+        // XCamReturn ret = init_fisheye (i);
+        //     XCAM_FAIL_RETURN (
+        //         ERROR, xcam_ret_is_ok (ret), ret,
+        //         "vk-stitcher:%s init fisheye failed, idx:%d.", XCAM_STR (_stitcher->get_name ()), i);
+    }
+
     const SmartPtr<VKDevice> &dev = _stitcher->get_vk_device ();
     XCAM_ASSERT (dev.ptr ());
 
@@ -507,6 +582,7 @@ StitcherImpl::start_geo_mappers (const SmartPtr<VKStitcher::StitcherParam> &para
 
 #if DUMP_BUFFER
         dump_buf (mapper_param->out_buf, idx, "stitcher-geomap");
+        // dump_buf (mapper_param->in_buf, idx, "ingeo");
 #endif
     }
 
@@ -576,7 +652,9 @@ StitcherImpl::start_blender (
 #endif
 
 #if HAVE_OPENCV
-    if (_stitcher->get_fm_mode ()) {
+    if (_stitcher->need_feature_match ()) {
+        // if (_stitcher->get_fm_mode ()) {
+        // printf("\n\n-------------%d\n\n",_stitcher->get_fm_mode ());
         ret = start_feature_match (blend_param->in_buf, blend_param->in1_buf, idx);
         XCAM_FAIL_RETURN (
             ERROR, xcam_ret_is_ok (ret), ret,
@@ -694,6 +772,8 @@ VKStitcher::stitch_buffers (const VideoBufferList &in_bufs, SmartPtr<VideoBuffer
         ERROR, !in_bufs.empty (), XCAM_RETURN_ERROR_PARAM,
         "vk-stitcher(%s) input buffers is empty", XCAM_STR (get_name ()));
 
+    ensure_stitch_path ();
+
     SmartPtr<StitcherParam> param = new StitcherParam ();
     XCAM_ASSERT (param.ptr ());
 
@@ -721,7 +801,7 @@ VKStitcher::stitch_buffers (const VideoBufferList &in_bufs, SmartPtr<VideoBuffer
 XCamReturn
 VKStitcher::configure_resource (const SmartPtr<Parameters> &param)
 {
-    XCAM_UNUSED (param);
+    XCAM_UNUSED (param);//
     XCAM_ASSERT (_impl.ptr ());
 
     XCamReturn ret = init_camera_info ();
@@ -753,12 +833,13 @@ VKStitcher::configure_resource (const SmartPtr<Parameters> &param)
     XCAM_FAIL_RETURN (
         ERROR, xcam_ret_is_ok (ret), ret,
         "vk-stitcher(%s) update copy areas failed", XCAM_STR (get_name ()));
-
-    ret = _impl->init_resource ();
+//
+    uint32_t camera_count = get_camera_num ();
+    ret = _impl->init_resource (camera_count);
     XCAM_FAIL_RETURN (
         ERROR, xcam_ret_is_ok (ret), ret,
         "vk-stitcher(%s) initialize private config failed", XCAM_STR (get_name ()));
-
+//
     VideoBufferInfo out_info;
     uint32_t out_width, out_height;
     get_output_size (out_width, out_height);

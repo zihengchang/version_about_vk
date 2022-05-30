@@ -288,6 +288,7 @@ void
 CVFeatureMatchCluster::feature_match (
     const SmartPtr<VideoBuffer> &left_buf, const SmartPtr<VideoBuffer> &right_buf)
 {
+    printf("cluster\n");
     XCAM_ASSERT (_left_rect.width && _left_rect.height);
     XCAM_ASSERT (_right_rect.width && _right_rect.height);
 
@@ -295,6 +296,7 @@ CVFeatureMatchCluster::feature_match (
     if (!convert_range_to_mat (left_buf, _left_rect, left_img)
             || !convert_range_to_mat (right_buf, _right_rect, right_img))
         return;
+    cv::imwrite("/home/chang/right_img.jpg", right_img);
 
     detect_and_match (left_img, right_img);
 

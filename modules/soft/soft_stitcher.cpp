@@ -241,6 +241,7 @@ FisheyeMap::set_map_table (
 {
     SmartPtr<FisheyeDewarp> dewarper;
     if(dewarp_mode == DewarpBowl) {
+// has done in vk stitch
         BowlDataConfig bowl = stitcher->get_bowl_config ();
         bowl.angle_start = view_slice.hori_angle_start;
         bowl.angle_end = format_angle (view_slice.hori_angle_start + view_slice.hori_angle_range);
@@ -251,7 +252,7 @@ FisheyeMap::set_map_table (
             "soft-stitcher:%s camera(idx:%d) info(angle start:%.2f, range:%.2f), bowl_info(angle start%.2f, end:%.2f)",
             XCAM_STR (stitcher->get_name ()), cam_idx,
             view_slice.hori_angle_start, view_slice.hori_angle_range, bowl.angle_start, bowl.angle_end);
-
+//
         CameraInfo cam_info;
         stitcher->get_camera_info (cam_idx, cam_info);
 
@@ -1153,7 +1154,7 @@ SoftStitcher::configure_resource (const SmartPtr<Parameters> &param)
     XCAM_FAIL_RETURN (
         ERROR, xcam_ret_is_ok (ret), ret,
         "soft-stitcher:%s update copy areas failed", XCAM_STR (get_name ()));
-
+//
     uint32_t camera_count = get_camera_num ();
     ret = _impl->init_config (camera_count);
     XCAM_FAIL_RETURN (
@@ -1164,7 +1165,7 @@ SoftStitcher::configure_resource (const SmartPtr<Parameters> &param)
     XCAM_FAIL_RETURN (
         ERROR, xcam_ret_is_ok (ret), ret,
         "soft-stitcher:%s gen_geomap_table failed", XCAM_STR (get_name ()));
-
+//
     VideoBufferInfo out_info;
     uint32_t out_width, out_height;
     get_output_size (out_width, out_height);
